@@ -1,19 +1,16 @@
-# app_valutazione_xbrl.py
-import streamlit as st
-import xml.etree.ElementTree as ET
+app_valutazione_xbrl.py
+
+import streamlit as st import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="Valutazione Aziendale da XBRL", layout="centered")
 
-st.title("📊 Valutazione Aziendale - Estrazione dati da file XBRL")
-st.markdown("Carica il file .xbrl per ottenere i dati di base per la valutazione dell'azienda.")
+st.title("📊 Valutazione Aziendale - Estrazione dati da file XBRL") st.markdown("Carica il file .xbrl per ottenere i dati di base per la valutazione dell'azienda.")
 
 uploaded_file = st.file_uploader("📎 Carica file .xbrl", type="xbrl")
 
-def estrai_dati_xbrl(file):
-    tree = ET.parse(file)
-    root = tree.getroot()
+def estrai_dati_xbrl(file): try: tree = ET.parse(file) root = tree.getroot()
 
-    def trova_valore(tag):
+def trova_valore(tag):
         for elem in root.iter():
             if elem.tag.endswith(tag):
                 try:
@@ -58,13 +55,9 @@ def estrai_dati_xbrl(file):
         "debiti_finanziari_medio_lungo": deb_mlt,
         "debiti_finanziari_totale": (deb_breve or 0) + (deb_mlt or 0)
     }
+except Exception as e:
+    st.error(f"Errore durante l'elaborazione del file: {e}")
+    return None
 
-if uploaded_file:
-    try:
-        dati = estrai_dati_xbrl(uploaded_file)
-        st.success("✅ Dati estratti correttamente!")
-        st.json(dati)
-        st.markdown("Copia il seguente blocco per il tuo GPT:")
-        st.code(dati, language="python")
-    except Exception as e:
-        st.error(f"Errore durante l'elaborazione del file: {e}")
+if uploaded_file: st.info("📄 File caricato. Elaborazione in corso...") dati = estrai_dati_xbrl(uploaded_file) if dati: st.success("✅ Dati estratti correttamente!") st.json(dati) st.markdown("Copia il seguente blocco per il tuo GPT:") st.code(dati, language="python") else: st.warning("⚠️ Nessun dato utile estratto dal file. Verifica il formato o prova con un altro XBRL.")
+
