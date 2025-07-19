@@ -1,6 +1,7 @@
 app_valutazione_xbrl.py
 
-import streamlit as st import xml.etree.ElementTree as ET
+import streamlit as st 
+import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="Valutazione Aziendale da XBRL", layout="centered")
 
