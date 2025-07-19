@@ -22,6 +22,12 @@ uploaded_file = st.file_uploader(
     help="Accetta file con estensione .xbrl o .xml contenenti dati XBRL"
 )
 
+# Debug immediato per verificare il caricamento
+if uploaded_file is not None:
+    st.write("🔍 **DEBUG**: File caricato:", uploaded_file.name)
+    st.write("🔍 **DEBUG**: Dimensione file:", uploaded_file.size, "bytes")
+    st.write("🔍 **DEBUG**: Tipo file:", uploaded_file.type)
+
 def pulisci_valore_numerico(text):
     """
     Pulisce e converte il testo in numero, gestendo vari formati.
@@ -236,9 +242,16 @@ def formatta_percentuale(valore):
     return f"{valore:.2f}%"
 
 # Interfaccia principale
-if uploaded_file:
+if uploaded_file is not None:
+    st.write("✅ File ricevuto! Inizio elaborazione...")
+    
     with st.spinner("📄 Elaborazione del file in corso..."):
-        dati = estrai_dati_xbrl(uploaded_file)
+        try:
+            dati = estrai_dati_xbrl(uploaded_file)
+            st.write("🔍 **DEBUG**: Dati estratti:", dati)
+        except Exception as e:
+            st.error(f"❌ Errore critico: {e}")
+            st.stop()
     
     if dati and any(v is not None for k, v in dati.items() if k not in ['denominazione', 'codice_fiscale']):
         st.success("✅ Dati estratti correttamente!")
