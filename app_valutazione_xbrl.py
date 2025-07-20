@@ -1,11 +1,10 @@
-# app_valutazione_xbrl.py
 import streamlit as st
 import xml.etree.ElementTree as ET
 import re
 from datetime import datetime
 import pandas as pd
 
-# Configurazione pagina
+# --- CONFIGURAZIONE PAGINA STREAMLIT ---
 st.set_page_config(
     page_title="Valutazione Aziendale da XBRL",
     layout="centered",
@@ -15,12 +14,7 @@ st.set_page_config(
 st.title("📊 Valutazione Aziendale - Estrazione dati da file XBRL")
 st.markdown("Carica il file .xbrl per ottenere i dati di base per la valutazione dell'azienda.")
 
-# File uploader
-uploaded_file = st.file_uploader(
-    "📎 Carica file .xbrl",
-    type=["xbrl", "xml"],
-    help="Accetta file con estensione .xbrl o .xml contenenti dati XBRL"
-)
+# --- FUNZIONI HELPER ---
 
 def pulisci_valore_numerico(text):
     """Pulisce e converte il testo in numero, gestendo vari formati italiani."""
@@ -35,68 +29,92 @@ def pulisci_valore_numerico(text):
     except (ValueError, AttributeError):
         return None
 
-# --- FUNZIONE DI ESTRAZIONE DATI COMPLETAMENTE RIVISTA ---
+def formatta_valore_monetario(valore):
+    """Formatta un valore monetario per la visualizzazione."""
+    if valore is None:
+        return "N/D"
+    return f"€ {valore:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def formatta_percentuale(valore):
+    """Formatta una percentuale per la visualizzazione."""
+    if valore is None:
+        return "N/D"
+    return f"{valore:.2f}%"
+
+
+# --- FUNZIONE DI ESTRAZIONE DATI RIVISTA E POTENZIATA ---
 def estrai_dati_xbrl(file):
     """
-    Estrae i dati principali da un file XBRL usando XPath per una maggiore robustezza ed efficienza.
+    Estrae i dati principali da un file XBRL in modo robusto, identificando prima
+    il contesto temporale corretto e poi estraendo i dati associati a quel contesto.
     """
     try:
         file.seek(0)
         tree = ET.parse(file)
         root = tree.getroot()
 
-        # Funzione helper per trovare un elemento usando una lista di possibili tag
-        def trova_elemento(possibili_tag):
-            for tag in possibili_tag:
-                # Usa una wildcard {*} per il namespace: è il modo più robusto
-                xpath_query = f".//{{*}}{tag}"
-                elementi = root.findall(xpath_query)
-                # I file XBRL spesso contengono valori per più anni (contesti diversi).
-                # Prendiamo il primo elemento che contiene un testo valido,
-                # che di solito corrisponde all'anno corrente.
-                for elem in elementi:
-                    if elem.text and elem.text.strip():
-                        return elem
+        # 1. Mappare i contesti temporali (contextRef) alle loro date di fine
+        contesti = {}
+        # Usiamo il wildcard {*} per la massima compatibilità con i namespace
+        for context in root.findall('.//{*}context'):
+            context_id = context.get('id')
+            end_date_element = context.find('.//{*}endDate')
+            if context_id and end_date_element is not None and end_date_element.text:
+                try:
+                    # Memorizza la data come oggetto datetime per un facile confronto
+                    contesti[context_id] = datetime.strptime(end_date_element.text.strip(), '%Y-%m-%d')
+                except ValueError:
+                    continue # Ignora contesti con formati data non validi
+
+        if not contesti:
+            st.error("❌ Impossibile trovare contesti temporali validi nel file XBRL.")
             return None
 
-        # Definisce i possibili tag per ogni dato (più robusto)
+        # 2. Identificare il contesto dell'anno più recente (il bilancio corrente)
+        context_recente_id = max(contesti, key=contesti.get)
+        anno_riferimento = contesti[context_recente_id].year
+
+        # 3. Funzione helper per estrarre un valore dato un elenco di tag e un contesto
+        def trova_valore_nel_contesto(possibili_tag, context_id):
+            for tag in possibili_tag:
+                # Query XPath che cerca il tag E il suo specifico contextRef
+                xpath_query = f".//{{*}}{tag}[@contextRef='{context_id}']"
+                elemento = root.find(xpath_query)
+                if elemento is not None and elemento.text and elemento.text.strip():
+                    return elemento.text
+            return None
+
+        # 4. Mappatura dei tag (con più alias per maggiore compatibilità)
         tag_mapping = {
-            'ricavi': ['ValoreProduzioneRicaviVenditePrestazioni', 'RicaviDelleVenditeEDellePrestazioni'],
-            'utile': ['UtilePerditaEsercizio', 'PatrimonioNettoUtilePerditaEsercizio'],
-            'attivo': ['TotaleAttivo', 'AttivoTotaleStatoPatrimoniale'],
-            'patrimonio_netto': ['TotalePatrimonioNetto', 'PatrimonioNetto'],
-            'debiti_breve': ['DebitiDebitiVersoBancheEsigibiliEntroEsercizioSuccessivo'],
-            'debiti_mlt': ['DebitiDebitiVersoBancheEsigibiliOltreEsercizioSuccessivo'],
+            'ricavi': ['ValoreProduzioneRicaviVenditePrestazioni', 'RicaviDelleVenditeEDellePrestazioni', 'itcc-ci_RicaviVenditePrestazioni'],
+            'utile': ['UtilePerditaEsercizio', 'PatrimonioNettoUtilePerditaEsercizio', 'itcc-ci_UtilePerditaEsercizio'],
+            'attivo': ['TotaleAttivo', 'AttivoTotaleStatoPatrimoniale', 'itcc-sp-a_TotaleAttivo'],
+            'patrimonio_netto': ['TotalePatrimonioNetto', 'PatrimonioNetto', 'itcc-sp-p_PatrimonioNetto'],
+            'debiti_breve': ['DebitiDebitiVersoBancheEsigibiliEntroEsercizioSuccessivo', 'itcc-sp-p_DebitiVersoBancheEntroEsercizio'],
+            'debiti_mlt': ['DebitiDebitiVersoBancheEsigibiliOltreEsercizioSuccessivo', 'itcc-sp-p_DebitiVersoBancheOltreEsercizio'],
             'denominazione': ['DatiAnagraficiDenominazione', 'Denominazione'],
             'codice_fiscale': ['DatiAnagraficiCodiceFiscale', 'CodiceFiscale']
         }
         
-        # Estrazione dei dati utilizzando la nuova funzione di ricerca
+        # 5. Estrazione dei dati usando la nuova logica "context-aware"
         dati_estratti = {}
         for chiave, tags in tag_mapping.items():
-            elemento = trova_elemento(tags)
-            if elemento is not None:
-                if 'denominazione' in chiave or 'codice_fiscale' in chiave:
-                    dati_estratti[chiave] = elemento.text.strip()
-                else:
-                    dati_estratti[chiave] = pulisci_valore_numerico(elemento.text)
+            if 'denominazione' in chiave or 'codice_fiscale' in chiave:
+                # I dati anagrafici non hanno contesto, li cerchiamo globalmente
+                # Usiamo una query che cerca il primo tag disponibile dalla lista
+                for tag in tags:
+                    elem = root.find(f".//{{*}}{tag}")
+                    if elem is not None and elem.text:
+                        dati_estratti[chiave] = elem.text.strip()
+                        break # Trovato, esci dal loop interno
+                if chiave not in dati_estratti:
+                     dati_estratti[chiave] = None # Se non trova nulla
             else:
-                dati_estratti[chiave] = None
+                # Per i dati finanziari, usiamo il contesto dell'anno più recente
+                valore_testo = trova_valore_nel_contesto(tags, context_recente_id)
+                dati_estratti[chiave] = pulisci_valore_numerico(valore_testo)
 
-        # Estrazione anno di riferimento dal contesto XBRL (modo più affidabile)
-        anno = None
-        # Cerca il tag 'endDate' che definisce il periodo di riferimento del bilancio
-        for elem in root.findall(".//{*}endDate"):
-            if elem.text:
-                try:
-                    # Prende l'anno e lo confronta per trovare il più recente
-                    anno_corrente = int(elem.text[:4])
-                    if anno is None or anno_corrente > anno:
-                        anno = anno_corrente
-                except (ValueError, IndexError):
-                    continue
-        
-        # Unisce i dati estratti con il dizionario finale
+        # 6. Preparazione del dizionario finale con calcoli aggiuntivi
         ricavi = dati_estratti.get('ricavi')
         utile = dati_estratti.get('utile')
         attivo = dati_estratti.get('attivo')
@@ -104,12 +122,10 @@ def estrai_dati_xbrl(file):
         debiti_breve = dati_estratti.get('debiti_breve')
         debiti_mlt = dati_estratti.get('debiti_mlt')
         
-        # Calcolo debiti finanziari totali con gestione None
         debiti_totali = None
         if debiti_breve is not None or debiti_mlt is not None:
             debiti_totali = (debiti_breve or 0) + (debiti_mlt or 0)
 
-        # Calcoli di indicatori aggiuntivi
         roe = (utile / patrimonio_netto * 100) if utile is not None and patrimonio_netto not in [0, None] else None
         roa = (utile / attivo * 100) if utile is not None and attivo not in [0, None] else None
         debt_to_equity = (debiti_totali / patrimonio_netto) if debiti_totali is not None and patrimonio_netto not in [0, None] else None
@@ -117,7 +133,7 @@ def estrai_dati_xbrl(file):
         return {
             "denominazione": dati_estratti.get('denominazione'),
             "codice_fiscale": dati_estratti.get('codice_fiscale'),
-            "anno": anno,
+            "anno": anno_riferimento,
             "ricavi": ricavi,
             "utile_netto": utile,
             "attivo": attivo,
@@ -137,23 +153,20 @@ def estrai_dati_xbrl(file):
         st.error(f"❌ Si è verificato un errore imprevisto durante l'elaborazione: {e}")
         return None
 
-def formatta_valore_monetario(valore):
-    """Formatta un valore monetario per la visualizzazione."""
-    if valore is None:
-        return "N/D"
-    return f"€ {valore:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def formatta_percentuale(valore):
-    """Formatta una percentuale per la visualizzazione."""
-    if valore is None:
-        return "N/D"
-    return f"{valore:.2f}%"
+# --- INTERFACCIA PRINCIPALE ---
 
-# --- INTERFACCIA PRINCIPALE (con logica di visualizzazione migliorata) ---
+# File uploader
+uploaded_file = st.file_uploader(
+    "📎 Carica file .xbrl",
+    type=["xbrl", "xml"],
+    help="Accetta file con estensione .xbrl o .xml contenenti dati XBRL"
+)
+
 if uploaded_file is not None:
     st.write("✅ File ricevuto! Inizio elaborazione...")
     
-    with st.spinner("📄 Sto leggendo il bilancio..."):
+    with st.spinner("📄 Sto leggendo il bilancio e analizzando i dati..."):
         dati = estrai_dati_xbrl(uploaded_file)
     
     if dati:
@@ -187,18 +200,18 @@ if uploaded_file is not None:
             debt_ratio = dati.get('debt_to_equity_ratio')
             col3.metric("Debt/Equity", f"{debt_ratio:.2f}" if debt_ratio is not None else "N/D", help="Rapporto tra debiti finanziari e patrimonio netto")
 
-            # Dati per export
+            # Dati per export in tabella
             st.subheader("📋 Riepilogo Dati per Elaborazioni Future")
             dati_puliti = {k.replace("_", " ").title(): v for k, v in dati.items() if v is not None}
             df_dati = pd.DataFrame(dati_puliti.items(), columns=["Voce", "Valore"])
             st.dataframe(df_dati, use_container_width=True, hide_index=True)
             
+            # Expander con i dati in formato JSON, come richiesto
             with st.expander("🤖 Dati formattati per GPT/LLM (formato JSON)"):
                 st.json({k: v for k, v in dati.items() if v is not None})
         else:
             st.warning("⚠️ Non è stato possibile estrarre dati finanziari significativi dal file.")
             st.info("Questo può accadere se la tassonomia XBRL del file è molto diversa da quella standard italiana o se i dati sono mancanti.")
-    # La gestione dell'errore è già dentro estrai_dati_xbrl, quindi non serve un else qui
-
+    
 else:
     st.info("👆 Carica un file .xbrl per iniziare l'analisi")
