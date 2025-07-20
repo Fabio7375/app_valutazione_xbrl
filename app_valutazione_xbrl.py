@@ -1,8 +1,11 @@
+# app_valutazione_xbrl.py
+
 import streamlit as st
 import xml.etree.ElementTree as ET
 import re
 from datetime import datetime
 import pandas as pd
+from io import BytesIO # Importa la libreria per gestire i file in memoria
 
 # --- CONFIGURAZIONE PAGINA STREAMLIT ---
 st.set_page_config(
@@ -42,30 +45,27 @@ def formatta_percentuale(valore):
     return f"{valore:.2f}%"
 
 
-# --- FUNZIONE DI ESTRAZIONE DATI RIVISTA E POTENZIATA ---
-def estrai_dati_xbrl(file):
+# --- FUNZIONE DI ESTRAZIONE DATI POTENZIATA E STABILE ---
+def estrai_dati_xbrl(file_buffer):
     """
-    Estrae i dati principali da un file XBRL in modo robusto, identificando prima
-    il contesto temporale corretto e poi estraendo i dati associati a quel contesto.
+    Estrae i dati da un buffer di file XBRL. È "stateless" e garantisce
+    un'analisi pulita ad ogni esecuzione.
     """
     try:
-        file.seek(0)
-        tree = ET.parse(file)
+        tree = ET.parse(file_buffer)
         root = tree.getroot()
 
         # 1. Mappare i contesti temporali (contextRef) alle loro date di fine
         contesti = {}
-        # Usiamo il wildcard {*} per la massima compatibilità con i namespace
         for context in root.findall('.//{*}context'):
             context_id = context.get('id')
             end_date_element = context.find('.//{*}endDate')
             if context_id and end_date_element is not None and end_date_element.text:
                 try:
-                    # Memorizza la data come oggetto datetime per un facile confronto
                     contesti[context_id] = datetime.strptime(end_date_element.text.strip(), '%Y-%m-%d')
                 except ValueError:
-                    continue # Ignora contesti con formati data non validi
-
+                    continue
+        
         if not contesti:
             st.error("❌ Impossibile trovare contesti temporali validi nel file XBRL.")
             return None
@@ -77,14 +77,13 @@ def estrai_dati_xbrl(file):
         # 3. Funzione helper per estrarre un valore dato un elenco di tag e un contesto
         def trova_valore_nel_contesto(possibili_tag, context_id):
             for tag in possibili_tag:
-                # Query XPath che cerca il tag E il suo specifico contextRef
                 xpath_query = f".//{{*}}{tag}[@contextRef='{context_id}']"
                 elemento = root.find(xpath_query)
                 if elemento is not None and elemento.text and elemento.text.strip():
                     return elemento.text
             return None
 
-        # 4. Mappatura dei tag (con più alias per maggiore compatibilità)
+        # 4. Mappatura dei tag per una maggiore compatibilità
         tag_mapping = {
             'ricavi': ['ValoreProduzioneRicaviVenditePrestazioni', 'RicaviDelleVenditeEDellePrestazioni', 'itcc-ci_RicaviVenditePrestazioni'],
             'utile': ['UtilePerditaEsercizio', 'PatrimonioNettoUtilePerditaEsercizio', 'itcc-ci_UtilePerditaEsercizio'],
@@ -96,21 +95,18 @@ def estrai_dati_xbrl(file):
             'codice_fiscale': ['DatiAnagraficiCodiceFiscale', 'CodiceFiscale']
         }
         
-        # 5. Estrazione dei dati usando la nuova logica "context-aware"
+        # 5. Estrazione dei dati
         dati_estratti = {}
         for chiave, tags in tag_mapping.items():
             if 'denominazione' in chiave or 'codice_fiscale' in chiave:
-                # I dati anagrafici non hanno contesto, li cerchiamo globalmente
-                # Usiamo una query che cerca il primo tag disponibile dalla lista
                 for tag in tags:
                     elem = root.find(f".//{{*}}{tag}")
                     if elem is not None and elem.text:
                         dati_estratti[chiave] = elem.text.strip()
-                        break # Trovato, esci dal loop interno
+                        break
                 if chiave not in dati_estratti:
-                     dati_estratti[chiave] = None # Se non trova nulla
+                     dati_estratti[chiave] = None
             else:
-                # Per i dati finanziari, usiamo il contesto dell'anno più recente
                 valore_testo = trova_valore_nel_contesto(tags, context_recente_id)
                 dati_estratti[chiave] = pulisci_valore_numerico(valore_testo)
 
@@ -154,9 +150,8 @@ def estrai_dati_xbrl(file):
         return None
 
 
-# --- INTERFACCIA PRINCIPALE ---
+# --- INTERFACCIA PRINCIPALE DELL'APPLICAZIONE ---
 
-# File uploader
 uploaded_file = st.file_uploader(
     "📎 Carica file .xbrl",
     type=["xbrl", "xml"],
@@ -164,18 +159,24 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    st.write("✅ File ricevuto! Inizio elaborazione...")
+    # --- SOLUZIONE PER LA STABILITÀ ---
+    # 1. Legge tutto il contenuto del file in una variabile "bytes".
+    file_bytes = uploaded_file.getvalue()
+    # 2. Crea un "file in memoria" (buffer) pulito e isolato.
+    file_buffer = BytesIO(file_bytes)
+    
+    st.info(f"✅ File '{uploaded_file.name}' ricevuto! Inizio elaborazione...")
     
     with st.spinner("📄 Sto leggendo il bilancio e analizzando i dati..."):
-        dati = estrai_dati_xbrl(uploaded_file)
+        # 3. Passa il buffer isolato alla funzione di parsing, non l'oggetto originale.
+        dati = estrai_dati_xbrl(file_buffer) 
     
+    # Se l'estrazione ha avuto successo, mostra i risultati
     if dati:
-        # Controlliamo se abbiamo estratto almeno un dato numerico fondamentale
         dati_numerici = [dati.get(k) for k in ['ricavi', 'utile_netto', 'attivo', 'patrimonio_netto']]
         if any(d is not None for d in dati_numerici):
             st.success("✅ Dati estratti con successo!")
             
-            # Visualizzazione dati aziendali
             st.subheader("🏢 Informazioni Aziendali")
             col1, col2 = st.columns(2)
             col1.metric("Denominazione", dati.get('denominazione', 'N/D'))
@@ -183,35 +184,31 @@ if uploaded_file is not None:
             if dati.get('codice_fiscale'):
                 st.metric("Codice Fiscale", dati['codice_fiscale'])
 
-            # Dati Finanziari
             st.subheader("💰 Dati Finanziari Principali")
             col1, col2, col3 = st.columns(3)
             col1.metric("Ricavi", formatta_valore_monetario(dati.get('ricavi')))
             col1.metric("Utile Netto", formatta_valore_monetario(dati.get('utile_netto')))
             col2.metric("Totale Attivo", formatta_valore_monetario(dati.get('attivo')))
             col2.metric("Patrimonio Netto", formatta_valore_monetario(dati.get('patrimonio_netto')))
-            col3.metric("Debiti Finanziari Totali", formatta_valore_monetario(dati.get('debiti_finanziari_totale')))
+            col3.metric("Debiti Finanziari", formatta_valore_monetario(dati.get('debiti_finanziari_totale')))
             
-            # Indicatori
             st.subheader("📈 Indicatori di Performance")
             col1, col2, col3 = st.columns(3)
-            col1.metric("ROE", formatta_percentuale(dati.get('roe_percentuale')), help="Return on Equity - Redditività del capitale proprio")
-            col2.metric("ROA", formatta_percentuale(dati.get('roa_percentuale')), help="Return on Assets - Redditività degli asset")
+            col1.metric("ROE", formatta_percentuale(dati.get('roe_percentuale')), help="Return on Equity: Utile / Patrimonio Netto")
+            col2.metric("ROA", formatta_percentuale(dati.get('roa_percentuale')), help="Return on Assets: Utile / Totale Attivo")
             debt_ratio = dati.get('debt_to_equity_ratio')
-            col3.metric("Debt/Equity", f"{debt_ratio:.2f}" if debt_ratio is not None else "N/D", help="Rapporto tra debiti finanziari e patrimonio netto")
+            col3.metric("Debt/Equity", f"{debt_ratio:.2f}" if debt_ratio is not None else "N/D", help="Rapporto Debiti Finanziari / Patrimonio Netto")
 
-            # Dati per export in tabella
             st.subheader("📋 Riepilogo Dati per Elaborazioni Future")
             dati_puliti = {k.replace("_", " ").title(): v for k, v in dati.items() if v is not None}
             df_dati = pd.DataFrame(dati_puliti.items(), columns=["Voce", "Valore"])
             st.dataframe(df_dati, use_container_width=True, hide_index=True)
             
-            # Expander con i dati in formato JSON, come richiesto
             with st.expander("🤖 Dati formattati per GPT/LLM (formato JSON)"):
                 st.json({k: v for k, v in dati.items() if v is not None})
         else:
             st.warning("⚠️ Non è stato possibile estrarre dati finanziari significativi dal file.")
-            st.info("Questo può accadere se la tassonomia XBRL del file è molto diversa da quella standard italiana o se i dati sono mancanti.")
+            st.info("Questo può accadere se la tassonomia XBRL del file è molto diversa da quella standard o se i dati richiesti sono mancanti.")
     
 else:
     st.info("👆 Carica un file .xbrl per iniziare l'analisi")
